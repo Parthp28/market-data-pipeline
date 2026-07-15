@@ -1,0 +1,42 @@
+# Spec and editor scaffolding kept out of the published tree
+CURSOR_*.md
+.cursorrules
+CLAUDE.md
+PROGRESS.md
+
+# Build and packages
+build/
+build-release/
+cmake-build-*/
+__pycache__/
+*.pyc
+*.pyo
+*.cpython-*.so
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+
+# Objects and editor junk
+*.o
+*.a
+*.dylib
+*.so
+.DS_Store
+*.swp
+*~
+
+# Captured feeds, bar logs, parquet exports, large fixtures
+*.bin
+*.parquet
+fixtures/*.bin
+*.capture
+*.log
+
+# Coverage and sanitizer artifacts
+coverage/
+*.gcda
+*.gcno
+*.profraw
+*.profdata
+default.profraw
