@@ -1,6 +1,22 @@
 #include "mdp/book.hpp"
 
+#include <bit>
+
 namespace mdp {
+namespace {
+
+// Mix so sequential order ids do not pack into a contiguous hash run.
+inline std::size_t order_slot(uint64_t order_id) {
+  uint64_t x = order_id;
+  x ^= x >> 30;
+  x *= 0xbf58476d1ce4e5b9ULL;
+  x ^= x >> 27;
+  x *= 0x94d049bb133111ebULL;
+  x ^= x >> 31;
+  return static_cast<std::size_t>(x) & (kOrderPool - 1);
+}
+
+}  // namespace
 
 BookBuilder::BookBuilder() = default;
 
@@ -9,7 +25,7 @@ bool BookBuilder::valid_price(uint32_t price) const {
 }
 
 OrderRecord* BookBuilder::find_order(uint64_t order_id) {
-  std::size_t idx = static_cast<std::size_t>(order_id) & (kOrderPool - 1);
+  std::size_t idx = order_slot(order_id);
   for (std::size_t i = 0; i < kOrderPool; ++i) {
     OrderRecord& rec = orders_[idx];
     if (rec.state == 0) {
@@ -31,7 +47,7 @@ OrderRecord* BookBuilder::insert_order(uint64_t order_id) {
   if (existing) {
     return existing;
   }
-  std::size_t idx = static_cast<std::size_t>(order_id) & (kOrderPool - 1);
+  std::size_t idx = order_slot(order_id);
   for (std::size_t i = 0; i < kOrderPool; ++i) {
     OrderRecord& rec = orders_[idx];
     if (rec.state == 0) {
@@ -47,7 +63,7 @@ OrderRecord* BookBuilder::insert_order(uint64_t order_id) {
 }
 
 void BookBuilder::erase_order(uint64_t order_id) {
-  std::size_t idx = static_cast<std::size_t>(order_id) & (kOrderPool - 1);
+  std::size_t idx = order_slot(order_id);
   std::size_t found = kOrderPool;
   for (std::size_t i = 0; i < kOrderPool; ++i) {
     OrderRecord& rec = orders_[idx];
@@ -64,11 +80,11 @@ void BookBuilder::erase_order(uint64_t order_id) {
     return;
   }
 
-  // Backshift deletion keeps probe chains contiguous so lookups stay short.
+  // Backshift with a mixed hash keeps the walk short at low load factor.
   std::size_t hole = found;
   std::size_t cur = (hole + 1) & (kOrderPool - 1);
   while (orders_[cur].state == 1) {
-    const std::size_t home = static_cast<std::size_t>(orders_[cur].order_id) & (kOrderPool - 1);
+    const std::size_t home = order_slot(orders_[cur].order_id);
     const bool can_move =
         (hole < cur) ? (home <= hole || home > cur) : (home <= hole && home > cur);
     if (can_move) {
@@ -86,24 +102,46 @@ void BookBuilder::erase_order(uint64_t order_id) {
   }
 }
 
+void BookBuilder::set_occupied(SideBook& side, uint32_t price, bool on) {
+  const std::size_t word = static_cast<std::size_t>(price) / 64;
+  const std::size_t bit = static_cast<std::size_t>(price) % 64;
+  const uint64_t mask = uint64_t{1} << bit;
+  if (on) {
+    side.occupied[word] |= mask;
+  } else {
+    side.occupied[word] &= ~mask;
+  }
+}
+
 void BookBuilder::recompute_best(SideBook& side, bool is_bid) {
   if (is_bid) {
-    uint32_t p = side.best_price ? side.best_price : kPriceLevels;
-    for (; p >= 1; --p) {
-      if (side.qty[p] > 0) {
-        side.best_price = p;
-        return;
+    int word = static_cast<int>(side.best_price / 64);
+    for (; word >= 0; --word) {
+      uint64_t bits = side.occupied[static_cast<std::size_t>(word)];
+      if (static_cast<uint32_t>(word) == side.best_price / 64) {
+        const uint32_t bit = side.best_price % 64;
+        if (bit < 63) {
+          bits &= (uint64_t{1} << (bit + 1)) - 1;
+        }
       }
-      if (p == 1) {
-        break;
+      if (bits != 0) {
+        const int leading = std::countl_zero(bits);
+        side.best_price = static_cast<uint32_t>(word * 64 + (63 - leading));
+        return;
       }
     }
     side.best_price = 0;
   } else {
-    uint32_t p = side.best_price ? side.best_price : 1;
-    for (; p <= kPriceLevels; ++p) {
-      if (side.qty[p] > 0) {
-        side.best_price = p;
+    std::size_t word = side.best_price / 64;
+    for (; word < kBitmapWords; ++word) {
+      uint64_t bits = side.occupied[word];
+      if (word == side.best_price / 64) {
+        const uint32_t bit = side.best_price % 64;
+        bits &= ~((uint64_t{1} << bit) - 1);
+      }
+      if (bits != 0) {
+        side.best_price =
+            static_cast<uint32_t>(word * 64 + static_cast<uint32_t>(std::countr_zero(bits)));
         return;
       }
     }
@@ -112,7 +150,11 @@ void BookBuilder::recompute_best(SideBook& side, bool is_bid) {
 }
 
 void BookBuilder::add_level(SideBook& side, uint32_t price, uint32_t qty, bool is_bid) {
+  const bool was_empty = side.qty[price] == 0;
   side.qty[price] += qty;
+  if (was_empty) {
+    set_occupied(side, price, true);
+  }
   if (side.best_price == 0) {
     side.best_price = price;
     return;
@@ -131,6 +173,9 @@ void BookBuilder::remove_level(SideBook& side, uint32_t price, uint32_t qty, boo
     side.qty[price] = 0;
   } else {
     side.qty[price] -= qty;
+  }
+  if (side.qty[price] == 0) {
+    set_occupied(side, price, false);
   }
   if (price == side.best_price && side.qty[price] == 0) {
     recompute_best(side, is_bid);
@@ -194,7 +239,6 @@ std::optional<NormalizedTick> BookBuilder::on_add(const AddOrder& m) {
     return std::nullopt;
   }
   if (rec->state == 1 && rec->qty > 0 && rec->order_id == m.order_id) {
-    // Replace duplicate id by removing prior resting size.
     SymbolBook& prev = books_[rec->symbol_id];
     SideBook& side = (rec->side == Side::Buy) ? prev.bid : prev.ask;
     remove_level(side, rec->price, rec->qty, rec->side == Side::Buy);

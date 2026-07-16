@@ -66,7 +66,7 @@ Measured on this machine with `./build-release/benchmarks/mdp_bench` (Release, A
 | Parse AddOrder | 2.87 ns | 350.5 M msgs/s |
 | SPSC queue push (with consumer drain) | 7.21 ns | 138.6 M ops/s |
 | Mutex + std::queue push (with consumer drain) | 41.2 ns | 32.2 M ops/s |
-| Book add+delete (bounded live window) | 3079 ns | 327 K ops/s |
+| Book add+delete (warm bounded window) | 18.7 ns | 53.9 M ops/s |
 
 SPSC is about 5.7x the mutex queue on the same producer or consumer pattern. Parser cost sits in the single-digit nanoseconds because frames are fixed-width and decoded with `memcpy` plus byte swaps, not allocations.
 

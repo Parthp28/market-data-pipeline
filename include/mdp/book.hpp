@@ -15,6 +15,7 @@ namespace mdp {
 inline constexpr uint32_t kMaxSymbols = 32;
 inline constexpr uint32_t kPriceLevels = 4096;
 inline constexpr std::size_t kOrderPool = 1u << 16;
+inline constexpr std::size_t kBitmapWords = (kPriceLevels / 64) + 1;
 
 struct TopOfBook {
   uint32_t symbol_id{0};
@@ -46,7 +47,7 @@ struct OrderRecord {
   Side side{Side::Buy};
   uint32_t price{0};
   uint32_t qty{0};
-  uint8_t state{0};  // 0 free, 1 live, 2 tombstone
+  uint8_t state{0};  // 0 free, 1 live
 };
 
 class BookBuilder {
@@ -65,6 +66,9 @@ class BookBuilder {
  private:
   struct SideBook {
     std::array<uint32_t, kPriceLevels + 1> qty{};
+    // Why: a word bitmap over ticks turns "find next populated level after
+    // deleting the BBO" into a bitscan instead of walking up to 4096 qty slots.
+    std::array<uint64_t, kBitmapWords> occupied{};
     uint32_t best_price{0};
   };
 
@@ -79,6 +83,7 @@ class BookBuilder {
   OrderRecord* find_order(uint64_t order_id);
   OrderRecord* insert_order(uint64_t order_id);
   void erase_order(uint64_t order_id);
+  void set_occupied(SideBook& side, uint32_t price, bool on);
   void add_level(SideBook& side, uint32_t price, uint32_t qty, bool is_bid);
   void remove_level(SideBook& side, uint32_t price, uint32_t qty, bool is_bid);
   void recompute_best(SideBook& side, bool is_bid);
